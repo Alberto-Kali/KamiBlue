@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module RequestController
   ( addScriptHandler
   , getScriptsHandler
@@ -8,7 +9,7 @@ module RequestController
 import ApiTypes
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.STM
-import Control.Exception (try, SomeException)
+import Control.Exception (try, catch, SomeException)
 import Control.Monad (forM_, forever, unless, when, filterM)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString.Lazy as BL
@@ -22,6 +23,8 @@ import System.IO (hFlush, hGetLine, hPutStrLn, Handle, hClose, hGetContents)
 import System.Process (createProcess, proc, CreateProcess(..), StdStream(..), waitForProcess)
 import qualified Network.WebSockets as WS
 import Servant
+import Control.Exception (catch, IOException, SomeException)
+import Network.WebSockets (ConnectionException)
 
 -- ----------------------------------------------------------------------
 --  Добавление скрипта: копирование шаблона, замена main.c, компиляция
@@ -52,7 +55,7 @@ addScriptHandler req = liftIO $ do
           copyDirectory templateDir srcDir
 
           -- Заменяем main.c (шаблон обязан содержать этот файл)
-          let mainPath = srcDir </> "main.c"
+          let mainPath = srcDir </> "src" </> scriptName ++ ".c"
           BL.writeFile mainPath (BL8.pack scriptContent)   -- используем BL8.pack
 
           -- Запускаем make в srcDir
@@ -100,12 +103,10 @@ scriptWebSocketHandler scriptName conn = liftIO $ do
     WS.sendClose conn ("Binary not found: " <> T.pack scriptName)
     return ()
 
-  -- Каналы для связи между потоками
-  toStdin  <- newTQueueIO   -- сообщения от клиента → stdin процесса
-  fromStdout <- newTQueueIO -- строки из stdout процесса
-  fromStderr <- newTQueueIO -- строки из stderr процесса
+  toStdin  <- newTQueueIO
+  fromStdout <- newTQueueIO
+  fromStderr <- newTQueueIO
 
-  -- Запуск процесса
   (Just inH, Just outH, Just errH, processHandle) <- createProcess
     (proc binaryPath [])
     { std_in  = CreatePipe
@@ -114,51 +115,74 @@ scriptWebSocketHandler scriptName conn = liftIO $ do
     , close_fds = True
     }
 
-  -- Поток: чтение из stdout и запись в fromStdout
-  stdoutReader <- forkIO $ forever $ do
-    line <- hGetLine outH
-    atomically $ writeTQueue fromStdout (T.pack line)
+  -- поток чтения stdout
+  stdoutReader <- forkIO $ do
+    let loop = do
+          line <- hGetLine outH
+          atomically $ writeTQueue fromStdout (T.pack line)
+          loop
+    loop `catch` (\(_ :: IOError) -> return ())
 
-  -- Поток: чтение из stderr и запись в fromStderr
-  stderrReader <- forkIO $ forever $ do
-    line <- hGetLine errH
-    atomically $ writeTQueue fromStderr (T.pack line)
+  -- поток чтения stderr
+  stderrReader <- forkIO $ do
+    let loop = do
+          line <- hGetLine errH
+          atomically $ writeTQueue fromStderr (T.pack line)
+          loop
+    loop `catch` (\(_ :: IOError) -> return ())
 
-  -- Поток: чтение из WebSocket (сообщения от клиента) → toStdin
+  -- поток приёма сообщений от клиента (WebSocket → toStdin)
   stdinWriter <- forkIO $ forever $ do
-    msg <- WS.receiveData conn :: IO Text
-    atomically $ writeTQueue toStdin msg
+    msg <- WS.receiveData conn `catch` (\(_ :: ConnectionException) -> return "")
+    when (msg /= "") $ atomically $ writeTQueue toStdin msg
 
-  -- Поток: отправка данных клиенту (из fromStdout / fromStderr)
-  let sender = forever $ do
-        outMsg <- atomically $ tryReadTQueue fromStdout
-        errMsg <- atomically $ tryReadTQueue fromStderr
-        case (outMsg, errMsg) of
-          (Nothing, Nothing) -> threadDelay 1000  -- нет данных – небольшая пауза
-          _ -> do
-            mapM_ (WS.sendTextData conn . ("[stdout] " <>)) outMsg
-            mapM_ (WS.sendTextData conn . ("[stderr] " <>)) errMsg
-  senderThread <- forkIO sender
+  -- поток отправки данных клиенту (fromStdout / fromStderr → WebSocket)
+  senderThread <- forkIO $ do
+    let loop = do
+          outMsg <- atomically $ tryReadTQueue fromStdout
+          errMsg <- atomically $ tryReadTQueue fromStderr
+          case (outMsg, errMsg) of
+            (Nothing, Nothing) -> threadDelay 1000
+            _ -> do
+              mapM_ (WS.sendTextData conn . ("[stdout] " <>)) outMsg
+              mapM_ (WS.sendTextData conn . ("[stderr] " <>)) errMsg
+          loop
+    loop `catch` (\(_ :: ConnectionException) -> return ())
 
-  -- Поток: передача данных из toStdin в stdin процесса
-  stdinFeeder <- forkIO $ forever $ do
-    msg <- atomically $ readTQueue toStdin
-    hPutStrLn inH (T.unpack msg)
-    hFlush inH
+  -- поток записи в stdin процесса
+  stdinFeeder <- forkIO $ do
+    let loop = do
+          msg <- atomically $ readTQueue toStdin
+          hPutStrLn inH (T.unpack msg)
+          hFlush inH
+          loop
+    loop `catch` (\(_ :: IOError) -> return ())
 
-  -- Ожидание завершения процесса и корректная очистка
+  -- ждём завершения процесса
   exitCode <- waitForProcess processHandle
-  -- Убиваем все потоки и закрываем соединение
-  killThread stdoutReader
-  killThread stderrReader
-  killThread stdinWriter
-  killThread senderThread
-  killThread stdinFeeder
-  hClose inH   -- закрываем дескрипторы (процесс уже завершён)
-  hClose outH
-  hClose errH
-  WS.sendClose conn (T.pack $ "Process finished with exit code: " ++ show exitCode)
 
+  -- даём время на отправку последних данных (500 мс)
+  threadDelay 500000
+
+  -- закрываем WebSocket (это вызовет исключения в потоках, работающих с сокетом)
+  WS.sendClose conn (T.pack $ "Process finished with exit code: " ++ show exitCode) `catch` (\(_ :: WS.ConnectionException) -> return ())
+
+  -- закрываем дескрипторы процесса
+  hClose inH `catch` (\(_ :: IOError) -> return ())
+  hClose outH `catch` (\(_ :: IOError) -> return ())
+  hClose errH `catch` (\(_ :: IOError) -> return ())
+
+  -- даём потокам завершиться после закрытия сокета
+  -- threadDelay 100000
+
+  -- принудительно убиваем потоки (на случай, если они ещё живы)
+  killThread stdoutReader `catch` (\(_ :: SomeException) -> return ())
+  killThread stderrReader `catch` (\(_ :: SomeException) -> return ())
+  killThread stdinWriter `catch` (\(_ :: SomeException) -> return ())
+  killThread senderThread `catch` (\(_ :: SomeException) -> return ())
+  killThread stdinFeeder `catch` (\(_ :: SomeException) -> return ())
+
+  
 -- ----------------------------------------------------------------------
 --  Вспомогательные функции
 -- ----------------------------------------------------------------------

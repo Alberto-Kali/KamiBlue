@@ -14,8 +14,8 @@ import System.Directory
 
 type SquareAPI = "hello" :> Get '[JSON] String
             :<|> "addScript" :> ReqBody '[JSON] AddScriptRequest :> Post '[JSON] AddScriptResponse
-            :<|> "scripts" :> Get '[JSON] [String]
-            :<|> "run" :> Capture "name" String :> "ws" :> WebSocket
+            :<|> "listScripts" :> Get '[JSON] [String]
+            :<|> "runScript" :> Capture "name" String :> "ws" :> WebSocket
 
 squareAPI :: Proxy SquareAPI
 squareAPI = Proxy
