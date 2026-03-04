@@ -115,7 +115,7 @@ scriptWebSocketHandler scriptName conn = liftIO $ do
     , close_fds = True
     }
 
-  -- поток чтения stdout
+  -- читаем stdout
   stdoutReader <- forkIO $ do
     let loop = do
           line <- hGetLine outH
@@ -123,7 +123,7 @@ scriptWebSocketHandler scriptName conn = liftIO $ do
           loop
     loop `catch` (\(_ :: IOError) -> return ())
 
-  -- поток чтения stderr
+  -- читаем stderr
   stderrReader <- forkIO $ do
     let loop = do
           line <- hGetLine errH
@@ -131,12 +131,12 @@ scriptWebSocketHandler scriptName conn = liftIO $ do
           loop
     loop `catch` (\(_ :: IOError) -> return ())
 
-  -- поток приёма сообщений от клиента (WebSocket → toStdin)
+  -- читаем сообщения от клиента (WebSocket) → toStdin
   stdinWriter <- forkIO $ forever $ do
-    msg <- WS.receiveData conn `catch` (\(_ :: ConnectionException) -> return "")
+    msg <- WS.receiveData conn `catch` (\(_ :: WS.ConnectionException) -> return "")
     when (msg /= "") $ atomically $ writeTQueue toStdin msg
 
-  -- поток отправки данных клиенту (fromStdout / fromStderr → WebSocket)
+  -- отправляем stdout/stderr клиенту
   senderThread <- forkIO $ do
     let loop = do
           outMsg <- atomically $ tryReadTQueue fromStdout
@@ -147,9 +147,9 @@ scriptWebSocketHandler scriptName conn = liftIO $ do
               mapM_ (WS.sendTextData conn . ("[stdout] " <>)) outMsg
               mapM_ (WS.sendTextData conn . ("[stderr] " <>)) errMsg
           loop
-    loop `catch` (\(_ :: ConnectionException) -> return ())
+    loop `catch` (\(_ :: WS.ConnectionException) -> return ())
 
-  -- поток записи в stdin процесса
+  -- пишем в stdin процесса
   stdinFeeder <- forkIO $ do
     let loop = do
           msg <- atomically $ readTQueue toStdin
@@ -158,30 +158,21 @@ scriptWebSocketHandler scriptName conn = liftIO $ do
           loop
     loop `catch` (\(_ :: IOError) -> return ())
 
-  -- ждём завершения процесса
   exitCode <- waitForProcess processHandle
+  threadDelay 100000  -- 100ms
 
-  -- даём время на отправку последних данных (500 мс)
-  threadDelay 500000
-
-  -- закрываем WebSocket (это вызовет исключения в потоках, работающих с сокетом)
-  WS.sendClose conn (T.pack $ "Process finished with exit code: " ++ show exitCode) `catch` (\(_ :: WS.ConnectionException) -> return ())
-
-  -- закрываем дескрипторы процесса
   hClose inH `catch` (\(_ :: IOError) -> return ())
   hClose outH `catch` (\(_ :: IOError) -> return ())
   hClose errH `catch` (\(_ :: IOError) -> return ())
 
-  -- даём потокам завершиться после закрытия сокета
-  -- threadDelay 100000
+  killThread stdoutReader
+  killThread stderrReader
+  killThread stdinWriter
+  killThread senderThread
+  killThread stdinFeeder
 
-  -- принудительно убиваем потоки (на случай, если они ещё живы)
-  killThread stdoutReader `catch` (\(_ :: SomeException) -> return ())
-  killThread stderrReader `catch` (\(_ :: SomeException) -> return ())
-  killThread stdinWriter `catch` (\(_ :: SomeException) -> return ())
-  killThread senderThread `catch` (\(_ :: SomeException) -> return ())
-  killThread stdinFeeder `catch` (\(_ :: SomeException) -> return ())
-
+  WS.sendClose conn (T.pack $ "Process finished with exit code: " ++ show exitCode)
+    `catch` (\(_ :: WS.ConnectionException) -> return ())
   
 -- ----------------------------------------------------------------------
 --  Вспомогательные функции
