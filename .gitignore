@@ -1,3 +1,6 @@
+.env
+.env.*
 .stack-work/
-.dev
+.dev/
+dist-newstyle/
 *~

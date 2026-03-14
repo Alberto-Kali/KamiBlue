@@ -27,14 +27,14 @@ server = helloHandler
     :<|> scriptWebSocketHandler
 
 helloHandler :: Handler String
-helloHandler = return "C‑script server is running"
+helloHandler = return "C-script server is running"
 
 app :: Application
 app = serve squareAPI server
 
 main :: IO ()
 main = do
-  putStrLn "Starting C‑script server on port 7485..."
+  putStrLn "Starting C-script server on port 7485..."
   -- Создаём необходимые папки, если их нет
   mapM_ (createDirectoryIfMissing True) ["sources", "bin", "tmp"]
   run 7485 app

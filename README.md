@@ -1,19 +1,20 @@
-# KamiBlue
+# KamiBlue Backend
 
----
+This branch owns the backend service image for KamiBlue.
 
-for building use stack:
+## Layout
 
+- `backend/` contains the Haskell service sources and Docker build context.
+- `.github/workflows/backend-image.yml` builds and publishes the image for this branch.
+
+## Local build
+
+```bash
+docker build -f backend/Dockerfile .
 ```
-stack build
-```
 
-u need a C project template with code marks for injection
+## Worktree
 
-```
-bin/
-sources/
-template/
-tmp/
-KamiBlue-exe
+```bash
+git worktree add ../KamiBlue-backend backend
 ```

@@ -12,14 +12,17 @@ import Control.Concurrent.STM
 import Control.Exception (try, catch, SomeException)
 import Control.Monad (forM_, forever, unless, when, filterM)
 import Control.Monad.IO.Class (liftIO)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8   -- для pack String
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Encoding.Error as TEE
 import System.Directory
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
-import System.IO (hFlush, hGetLine, hPutStrLn, Handle, hClose, hGetContents)
+import System.IO (hFlush, hGetLine, hPutStrLn, Handle, hClose)
 import System.Process (createProcess, proc, CreateProcess(..), StdStream(..), waitForProcess)
 import qualified Network.WebSockets as WS
 import Servant
@@ -197,9 +200,9 @@ copyDirectory src dst = do
 readProcessWithExitCode' :: FilePath -> [String] -> IO (ExitCode, String, String)
 readProcessWithExitCode' cmd args = do
   (_, Just outH, Just errH, ph) <- createProcess (proc cmd args) { std_out = CreatePipe, std_err = CreatePipe }
+  outBytes <- BS.hGetContents outH
+  errBytes <- BS.hGetContents errH
   exitCode <- waitForProcess ph
-  outStr <- hGetContents outH
-  errStr <- hGetContents errH
-  -- Принудительно вычитываем, так как hGetContents ленивое
-  length outStr `seq` length errStr `seq` return ()
+  let outStr = T.unpack (TE.decodeUtf8With TEE.lenientDecode outBytes)
+      errStr = T.unpack (TE.decodeUtf8With TEE.lenientDecode errBytes)
   return (exitCode, outStr, errStr)
