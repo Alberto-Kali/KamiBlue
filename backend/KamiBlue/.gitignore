@@ -1,3 +1,5 @@
 .stack-work/
-.dev
+.dev/*
+!.dev/template/
+!.dev/template/Makefile
 *~
