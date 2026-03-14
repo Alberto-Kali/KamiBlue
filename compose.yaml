@@ -1,0 +1,35 @@
+services:
+  backend:
+    image: ghcr.io/alberto-kali/kamiblue-backend:latest
+    container_name: kb-backend
+    restart: unless-stopped
+    ports:
+      - "7485:7485"
+
+  telegram:
+    image: ghcr.io/alberto-kali/kamiblue-telegram:latest
+    container_name: kb-telegram-userbot
+    restart: unless-stopped
+    depends_on:
+      - backend
+    env_file:
+      - .env
+    environment:
+      API_ID: ${API_ID}
+      API_HASH: ${API_HASH}
+      SESSION_STRING: ${SESSION_STRING}
+      TG_SESSION: ${TG_SESSION:-/data/userbot}
+      BACKEND_HTTP_BASE: ${BACKEND_HTTP_BASE:-http://backend:7485}
+      BACKEND_WS_BASE: ${BACKEND_WS_BASE:-ws://backend:7485}
+      TG_PROXY: ${TG_PROXY:-}
+      COMMAND_PREFIX: ${COMMAND_PREFIX:-.}
+      INPUT_TIMEOUT_SECONDS: ${INPUT_TIMEOUT_SECONDS:-120}
+    stdin_open: true
+    tty: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - telegram-data:/data
+
+volumes:
+  telegram-data:

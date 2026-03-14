@@ -1,3 +1,8 @@
-.stack-work/
-.dev
+.env
+.env.*
+!.env.example
+*.session
+telegram/data/
+__pycache__/
+*.pyc
 *~
